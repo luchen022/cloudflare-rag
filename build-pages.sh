@@ -27,31 +27,41 @@ fi
 
 echo "✅ 检测到 Workers URL: $WORKERS_URL"
 
-# 创建临时目录
-rm -rf .pages-build
-mkdir -p .pages-build
-
-# 复制 public 目录
-cp -r public/* .pages-build/
-
 # 替换 API_BASE（兼容 Linux 和 macOS）
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
-    sed -i '' "s|const API_BASE = '';|const API_BASE = '$WORKERS_URL';|g" .pages-build/index.html
+    sed -i '' "s|const API_BASE = '';|const API_BASE = '$WORKERS_URL';|g" public/index.html
 else
     # Linux
-    sed -i "s|const API_BASE = '';|const API_BASE = '$WORKERS_URL';|g" .pages-build/index.html
+    sed -i "s|const API_BASE = '';|const API_BASE = '$WORKERS_URL';|g" public/index.html
 fi
 
 echo "✅ 已设置 API_BASE = $WORKERS_URL"
 echo ""
-echo "🚀 部署到 Pages..."
+echo "🚀 部署到 Pages（生产环境）..."
 
-# 部署
-wrangler pages deploy .pages-build --project-name=cloudflare-rag
+# 部署到生产环境（指定 branch=main）
+wrangler pages deploy public --project-name=cloudflare-rag --branch=main
 
-# 清理
-rm -rf .pages-build
+# 保存部署结果
+DEPLOY_RESULT=$?
 
-echo ""
-echo "✅ 部署完成！"
+# 恢复 API_BASE
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    sed -i '' "s|const API_BASE = '$WORKERS_URL';|const API_BASE = '';|g" public/index.html
+else
+    # Linux
+    sed -i "s|const API_BASE = '$WORKERS_URL';|const API_BASE = '';|g" public/index.html
+fi
+
+if [ $DEPLOY_RESULT -eq 0 ]; then
+    echo ""
+    echo "✅ 部署完成！"
+    echo "✅ 已恢复 index.html 为原始状态"
+else
+    echo ""
+    echo "❌ 部署失败"
+    echo "✅ 已恢复 index.html 为原始状态"
+    exit $DEPLOY_RESULT
+fi

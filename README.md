@@ -65,6 +65,10 @@ npm run deploy:pages
 npm run deploy:all
 ```
 
+**注意**：首次部署 Pages 时，需要在 Cloudflare Dashboard 中设置生产分支：
+1. Workers & Pages → cloudflare-rag → Settings → Builds & deployments
+2. 设置 "Production branch" 为 `main`
+
 ### 5. 使用
 
 1. 访问 Pages URL
