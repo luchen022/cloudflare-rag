@@ -522,6 +522,22 @@
       flex: 1;
     }
 
+    @media (max-width: 768px) {
+      .model-selector {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 5px;
+      }
+
+      .model-selector label {
+        min-width: unset;
+      }
+
+      .model-selector select {
+        width: 100%;
+      }
+    }
+
     .loading {
       display: inline-block;
       width: 16px;
