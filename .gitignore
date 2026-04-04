@@ -1,0 +1,14 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+*.log
+.DS_Store
+.env
+wrangler.toml
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.pages-build/

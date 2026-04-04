@@ -1,0 +1,23 @@
+name = "cloudflare-rag"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Workers URL（部署后填写你的 Workers URL）
+[vars]
+WORKERS_URL = "YOUR_WORKERS_URL"  # 例如: https://cloudflare-rag.your-subdomain.workers.dev
+
+# Vectorize 绑定
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "knowledge-base-index"
+
+# R2 绑定
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "knowledge-base-chunks"
+
+# KV 绑定（用于存储配置和认证）
+[[kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"  # 替换为你的 KV 命名空间 ID
+

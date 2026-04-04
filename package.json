@@ -1,0 +1,19 @@
+{
+  "name": "cloudflare-rag",
+  "version": "1.0.0",
+  "description": "个人知识库 RAG 系统 - Cloudflare Workers + Vectorize + R2",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:pages": "bash build-pages.sh",
+    "deploy:all": "npm run deploy && npm run deploy:pages"
+  },
+  "keywords": ["rag", "cloudflare", "vectorize", "r2"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
