@@ -406,19 +406,15 @@ async function handleUploadStream(request, env) {
 
   const fileName = file.name;
   
-  // 检查是否已存在同名文件
-  const existingDocsJson = await env.KV.get('documents_list');
-  if (existingDocsJson) {
-    const documents = JSON.parse(existingDocsJson);
-    const existingDoc = documents.find(doc => doc.fileName === fileName);
-    if (existingDoc) {
-      return jsonResponse({ 
-        error: '该文档已上传过',
-        message: `文件 "${fileName}" 已经存在于知识库中，无需重复上传`,
-        existingDocId: existingDoc.docId,
-        uploadTime: new Date(existingDoc.timestamp).toLocaleString('zh-CN')
-      }, 409);
-    }
+  // 检查是否已存在同名文件（使用分页存储）
+  const existingDoc = await checkDocumentExists(env, fileName);
+  if (existingDoc) {
+    return jsonResponse({ 
+      error: '该文档已上传过',
+      message: `文件 "${fileName}" 已经存在于知识库中，无需重复上传`,
+      existingDocId: existingDoc.docId,
+      uploadTime: new Date(existingDoc.timestamp).toLocaleString('zh-CN')
+    }, 409);
   }
   
   const fileType = file.type;
@@ -511,16 +507,14 @@ async function handleUploadStream(request, env) {
         }
       }
       
-      // 更新 KV 中的文档列表
-      const docsJson = await env.KV.get('documents_list');
-      const documents = docsJson ? JSON.parse(docsJson) : [];
-      documents.push({
+      // 更新 KV 中的文档列表（使用分页存储）
+      await addDocumentToList(env, {
         docId,
         fileName,
         timestamp,
         chunksCount: chunks.length,
+        embeddingModel,
       });
-      await env.KV.put('documents_list', JSON.stringify(documents));
       
       // 发送完成消息
       await writer.write(encoder.encode(`data: ${JSON.stringify({
@@ -568,19 +562,15 @@ async function handleUpload(request, env) {
 
   const fileName = file.name;
   
-  // 检查是否已存在同名文件
-  const existingDocsJson2 = await env.KV.get('documents_list');
-  if (existingDocsJson2) {
-    const documents = JSON.parse(existingDocsJson2);
-    const existingDoc = documents.find(doc => doc.fileName === fileName);
-    if (existingDoc) {
-      return jsonResponse({ 
-        error: '该文档已上传过',
-        message: `文件 "${fileName}" 已经存在于知识库中，无需重复上传`,
-        existingDocId: existingDoc.docId,
-        uploadTime: new Date(existingDoc.timestamp).toLocaleString('zh-CN')
-      }, 409);
-    }
+  // 检查是否已存在同名文件（使用分页存储）
+  const existingDoc = await checkDocumentExists(env, fileName);
+  if (existingDoc) {
+    return jsonResponse({ 
+      error: '该文档已上传过',
+      message: `文件 "${fileName}" 已经存在于知识库中，无需重复上传`,
+      existingDocId: existingDoc.docId,
+      uploadTime: new Date(existingDoc.timestamp).toLocaleString('zh-CN')
+    }, 409);
   }
   const fileType = file.type;
   const arrayBuffer = await file.arrayBuffer();
@@ -645,17 +635,14 @@ async function handleUpload(request, env) {
     }]);
   }
 
-  // 更新文档列表到 KV
-  const docsJson = await env.KV.get('documents_list');
-  const documents = docsJson ? JSON.parse(docsJson) : [];
-  documents.push({
+  // 更新文档列表到 KV（使用分页存储）
+  await addDocumentToList(env, {
     docId,
     fileName,
     timestamp,
     chunksCount: chunks.length,
     embeddingModel,
   });
-  await env.KV.put('documents_list', JSON.stringify(documents));
 
   return jsonResponse({
     success: true,
@@ -778,19 +765,131 @@ async function handleDebugR2(request, env) {
   return jsonResponse(debugInfo);
 }
 
-// 列出所有文档
-async function handleList(request, env) {
-  // 从 KV 读取文档列表（更高效）
-  const docsJson = await env.KV.get('documents_list');
+// 文档列表管理（分页存储）
+const DOCS_PER_PAGE = 100; // 每页存储 100 个文档
+
+// 添加文档到列表
+async function addDocumentToList(env, docInfo) {
+  // 获取索引信息
+  const indexJson = await env.KV.get('documents_index');
+  const index = indexJson ? JSON.parse(indexJson) : { total: 0, pages: 0 };
   
-  if (!docsJson) {
-    return jsonResponse({ documents: [] });
+  // 计算当前页码
+  const currentPage = Math.floor(index.total / DOCS_PER_PAGE);
+  
+  // 读取当前页
+  const pageKey = `documents_list_page_${currentPage}`;
+  const pageJson = await env.KV.get(pageKey);
+  const pageData = pageJson ? JSON.parse(pageJson) : [];
+  
+  // 添加文档
+  pageData.push(docInfo);
+  
+  // 保存当前页
+  await env.KV.put(pageKey, JSON.stringify(pageData));
+  
+  // 更新索引
+  index.total += 1;
+  index.pages = Math.ceil(index.total / DOCS_PER_PAGE);
+  await env.KV.put('documents_index', JSON.stringify(index));
+}
+
+// 检查文档是否存在
+async function checkDocumentExists(env, fileName) {
+  const indexJson = await env.KV.get('documents_index');
+  if (!indexJson) {
+    return null;
   }
   
-  const documents = JSON.parse(docsJson);
+  const index = JSON.parse(indexJson);
+  
+  // 遍历所有页查找
+  for (let page = 0; page < index.pages; page++) {
+    const pageKey = `documents_list_page_${page}`;
+    const pageJson = await env.KV.get(pageKey);
+    
+    if (pageJson) {
+      const pageData = JSON.parse(pageJson);
+      const existingDoc = pageData.find(doc => doc.fileName === fileName);
+      if (existingDoc) {
+        return existingDoc;
+      }
+    }
+  }
+  
+  return null;
+}
+
+// 获取所有文档列表
+async function getAllDocuments(env) {
+  const indexJson = await env.KV.get('documents_index');
+  if (!indexJson) {
+    return [];
+  }
+  
+  const index = JSON.parse(indexJson);
+  const allDocuments = [];
+  
+  // 读取所有页
+  for (let page = 0; page < index.pages; page++) {
+    const pageKey = `documents_list_page_${page}`;
+    const pageJson = await env.KV.get(pageKey);
+    
+    if (pageJson) {
+      const pageData = JSON.parse(pageJson);
+      allDocuments.push(...pageData);
+    }
+  }
+  
+  return allDocuments;
+}
+
+// 列出所有文档
+// 列出所有文档
+async function handleList(request, env) {
+  const url = new URL(request.url);
+  const page = parseInt(url.searchParams.get('page') || '0');
+  const pageSize = parseInt(url.searchParams.get('pageSize') || '20');
+  
+  // 获取索引信息
+  const indexJson = await env.KV.get('documents_index');
+  if (!indexJson) {
+    return jsonResponse({ documents: [], total: 0, hasMore: false });
+  }
+  
+  const index = JSON.parse(indexJson);
+  
+  // 计算需要读取哪些存储页
+  const startDoc = page * pageSize;
+  const endDoc = startDoc + pageSize;
+  
+  const startPage = Math.floor(startDoc / DOCS_PER_PAGE);
+  const endPage = Math.floor((endDoc - 1) / DOCS_PER_PAGE);
+  
+  const allDocuments = [];
+  
+  // 读取需要的存储页
+  for (let p = startPage; p <= endPage && p < index.pages; p++) {
+    const pageKey = `documents_list_page_${p}`;
+    const pageJson = await env.KV.get(pageKey);
+    
+    if (pageJson) {
+      const pageData = JSON.parse(pageJson);
+      allDocuments.push(...pageData);
+    }
+  }
+  
+  // 排序并截取需要的部分
+  const sortedDocs = allDocuments.sort((a, b) => b.timestamp - a.timestamp);
+  const startIndex = startDoc % DOCS_PER_PAGE;
+  const documents = sortedDocs.slice(startIndex, startIndex + pageSize);
   
   return jsonResponse({
-    documents: documents.sort((a, b) => b.timestamp - a.timestamp),
+    documents,
+    total: index.total,
+    page,
+    pageSize,
+    hasMore: endDoc < index.total,
   });
 }
 

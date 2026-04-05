@@ -1567,7 +1567,7 @@
                     progress: data.chunksCount,
                     total: data.chunksCount
                   });
-                  loadDocuments();
+                  loadDocuments(true); // 重置并重新加载文档列表
                 } else if (data.type === 'error') {
                   this.updateItem(item.id, { 
                     status: 'error', 
@@ -1620,18 +1620,31 @@
       fileInput.value = ''; // 清空以允许重复选择相同文件
     });
 
-    // 加载文档列表
-    async function loadDocuments() {
+    // 加载文档列表（支持分页）
+    let currentPage = 0;
+    let isLoadingDocs = false;
+    let hasMoreDocs = true;
+    let allLoadedDocs = [];
+
+    async function loadDocuments(reset = false) {
+      if (isLoadingDocs) return;
+      if (!hasMoreDocs && !reset) return;
+      
       const docsList = document.getElementById('docsList');
       
-      docsList.innerHTML = '<p style="color: #999;">加载中...</p>';
+      if (reset) {
+        currentPage = 0;
+        hasMoreDocs = true;
+        allLoadedDocs = [];
+        docsList.innerHTML = '<p style="color: #999;">加载中...</p>';
+      }
+      
+      isLoadingDocs = true;
       
       try {
-        
-        const response = await fetch(`${API_BASE}/api/list`, {
+        const response = await fetch(`${API_BASE}/api/list?page=${currentPage}&pageSize=20`, {
           headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
         });
-        
         
         if (!response.ok) {
           const errorText = await response.text();
@@ -1640,13 +1653,17 @@
         }
         
         const data = await response.json();
+        
+        allLoadedDocs.push(...data.documents);
+        hasMoreDocs = data.hasMore;
+        currentPage++;
 
-        if (!data.documents || data.documents.length === 0) {
+        if (allLoadedDocs.length === 0) {
           docsList.innerHTML = '<p style="color: #999;">暂无文档</p>';
           return;
         }
 
-        docsList.innerHTML = data.documents.map(doc => `
+        docsList.innerHTML = allLoadedDocs.map(doc => `
           <div class="doc-item">
             <div class="doc-name">${doc.fileName}</div>
             <div class="doc-meta">
@@ -1655,11 +1672,29 @@
             </div>
           </div>
         `).join('');
+        
+        // 添加加载更多提示
+        if (hasMoreDocs) {
+          docsList.innerHTML += '<p style="color: #999; text-align: center; padding: 10px;">滚动加载更多...</p>';
+        } else {
+          docsList.innerHTML += '<p style="color: #999; text-align: center; padding: 10px;">已加载全部文档</p>';
+        }
       } catch (error) {
         console.error('加载文档列表失败:', error);
         docsList.innerHTML = `<p style="color: #f44336;">加载失败：${error.message}<br>请检查浏览器控制台查看详细错误</p>`;
+      } finally {
+        isLoadingDocs = false;
       }
     }
+
+    // 监听滚动事件实现无限加载
+    document.getElementById('docsList').addEventListener('scroll', (e) => {
+      const element = e.target;
+      if (element.scrollHeight - element.scrollTop <= element.clientHeight + 50) {
+        // 距离底部 50px 时加载下一页
+        loadDocuments();
+      }
+    });
 
     // 查询
     const queryInput = document.getElementById('queryInput');
