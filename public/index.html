@@ -1366,6 +1366,12 @@
         });
 
         if (!response.ok) {
+          // 特殊处理 409 状态码（文件已存在）
+          if (response.status === 409) {
+            const errorData = await response.json();
+            uploadStatus.innerHTML = `<div class="status error">⚠️ ${errorData.error || '该文档已上传过'}<br><small style="color: #666;">${errorData.message || ''}</small></div>`;
+            return;
+          }
           throw new Error('上传失败');
         }
 

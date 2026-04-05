@@ -405,6 +405,22 @@ async function handleUploadStream(request, env) {
   }
 
   const fileName = file.name;
+  
+  // 检查是否已存在同名文件
+  const existingDocsJson = await env.KV.get('documents_list');
+  if (existingDocsJson) {
+    const documents = JSON.parse(existingDocsJson);
+    const existingDoc = documents.find(doc => doc.fileName === fileName);
+    if (existingDoc) {
+      return jsonResponse({ 
+        error: '该文档已上传过',
+        message: `文件 "${fileName}" 已经存在于知识库中，无需重复上传`,
+        existingDocId: existingDoc.docId,
+        uploadTime: new Date(existingDoc.timestamp).toLocaleString('zh-CN')
+      }, 409);
+    }
+  }
+  
   const fileType = file.type;
   const arrayBuffer = await file.arrayBuffer();
   
@@ -551,6 +567,21 @@ async function handleUpload(request, env) {
   }
 
   const fileName = file.name;
+  
+  // 检查是否已存在同名文件
+  const existingDocsJson2 = await env.KV.get('documents_list');
+  if (existingDocsJson2) {
+    const documents = JSON.parse(existingDocsJson2);
+    const existingDoc = documents.find(doc => doc.fileName === fileName);
+    if (existingDoc) {
+      return jsonResponse({ 
+        error: '该文档已上传过',
+        message: `文件 "${fileName}" 已经存在于知识库中，无需重复上传`,
+        existingDocId: existingDoc.docId,
+        uploadTime: new Date(existingDoc.timestamp).toLocaleString('zh-CN')
+      }, 409);
+    }
+  }
   const fileType = file.type;
   const arrayBuffer = await file.arrayBuffer();
   
@@ -613,6 +644,18 @@ async function handleUpload(request, env) {
       },
     }]);
   }
+
+  // 更新文档列表到 KV
+  const docsJson = await env.KV.get('documents_list');
+  const documents = docsJson ? JSON.parse(docsJson) : [];
+  documents.push({
+    docId,
+    fileName,
+    timestamp,
+    chunksCount: chunks.length,
+    embeddingModel,
+  });
+  await env.KV.put('documents_list', JSON.stringify(documents));
 
   return jsonResponse({
     success: true,
