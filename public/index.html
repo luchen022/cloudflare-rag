@@ -255,6 +255,64 @@
       color: #0c5460;
     }
 
+    .upload-queue {
+      margin-top: 15px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .queue-item {
+      padding: 12px;
+      background: #f9f9f9;
+      margin-bottom: 8px;
+      border-radius: 6px;
+      border-left: 4px solid #ddd;
+    }
+
+    .queue-item.uploading {
+      border-left-color: #2196F3;
+      background: #e3f2fd;
+    }
+
+    .queue-item.success {
+      border-left-color: #4CAF50;
+      background: #e8f5e9;
+    }
+
+    .queue-item.error {
+      border-left-color: #f44336;
+      background: #ffebee;
+    }
+
+    .queue-item.waiting {
+      border-left-color: #ff9800;
+      background: #fff3e0;
+    }
+
+    .queue-item-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
+    .queue-item-name {
+      font-weight: 600;
+      color: #2c3e50;
+      font-size: 14px;
+    }
+
+    .queue-item-status {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .queue-item-progress {
+      font-size: 12px;
+      color: #666;
+      margin-top: 4px;
+    }
+
     .docs-list {
       max-height: 400px;
       overflow-y: auto;
@@ -587,9 +645,10 @@
         <h2>📤 上传文档</h2>
         <div class="upload-area" id="uploadArea">
           <p>📁 点击或拖拽文件到此处</p>
-          <p style="color: #999; font-size: 12px; margin-top: 8px;">支持 TXT、MD 格式</p>
-          <input type="file" id="fileInput" accept=".txt,.md">
+          <p style="color: #999; font-size: 12px; margin-top: 8px;">支持 TXT、MD 格式 | 可同时选择多个文件</p>
+          <input type="file" id="fileInput" accept=".txt,.md" multiple>
         </div>
+        <div id="uploadQueue"></div>
         <div id="uploadStatus"></div>
       </div>
 
@@ -1318,6 +1377,221 @@
     const uploadArea = document.getElementById('uploadArea');
     const fileInput = document.getElementById('fileInput');
     const uploadStatus = document.getElementById('uploadStatus');
+    const uploadQueue = document.getElementById('uploadQueue');
+
+    // 上传队列管理
+    const uploadManager = {
+      queue: [],
+      isUploading: false,
+      currentUpload: null,
+
+      addFiles(files) {
+        const newFiles = Array.from(files).map(file => ({
+          id: Date.now() + Math.random(),
+          file: file,
+          status: 'waiting', // waiting, uploading, success, error
+          progress: 0,
+          total: 0,
+          message: '等待上传...',
+        }));
+        
+        this.queue.push(...newFiles);
+        this.renderQueue();
+        this.processQueue();
+      },
+
+      renderQueue() {
+        if (this.queue.length === 0) {
+          uploadQueue.innerHTML = '';
+          return;
+        }
+
+        uploadQueue.innerHTML = '<div class="upload-queue">' + 
+          this.queue.map(item => {
+            let statusIcon = '';
+            let statusClass = item.status;
+            
+            switch(item.status) {
+              case 'waiting':
+                statusIcon = '⏳';
+                break;
+              case 'uploading':
+                statusIcon = '⬆️';
+                break;
+              case 'success':
+                statusIcon = '✓';
+                break;
+              case 'error':
+                statusIcon = '✗';
+                break;
+            }
+
+            let progressHtml = '';
+            if (item.total > 0) {
+              const percent = Math.round((item.progress / item.total) * 100);
+              progressHtml = `<div class="queue-item-progress">${item.progress}/${item.total} (${percent}%)</div>`;
+            }
+
+            return `
+              <div class="queue-item ${statusClass}" data-id="${item.id}">
+                <div class="queue-item-header">
+                  <span class="queue-item-name">${statusIcon} ${item.file.name}</span>
+                  <span class="queue-item-status">${item.message}</span>
+                </div>
+                ${progressHtml}
+              </div>
+            `;
+          }).join('') + '</div>';
+      },
+
+      updateItem(id, updates) {
+        const item = this.queue.find(i => i.id === id);
+        if (item) {
+          Object.assign(item, updates);
+          this.renderQueue();
+        }
+      },
+
+      async processQueue() {
+        if (this.isUploading || this.queue.length === 0) {
+          return;
+        }
+
+        const nextItem = this.queue.find(item => item.status === 'waiting');
+        if (!nextItem) {
+          // 所有文件处理完成
+          if (this.queue.every(item => item.status === 'success' || item.status === 'error')) {
+            const successCount = this.queue.filter(item => item.status === 'success').length;
+            const errorCount = this.queue.filter(item => item.status === 'error').length;
+            
+            uploadStatus.innerHTML = `<div class="status ${errorCount > 0 ? 'info' : 'success'}">
+              上传完成！成功: ${successCount}，失败: ${errorCount}
+            </div>`;
+            
+            setTimeout(() => {
+              uploadStatus.innerHTML = '';
+            }, 5000);
+          }
+          return;
+        }
+
+        this.isUploading = true;
+        this.currentUpload = nextItem;
+        
+        await this.uploadFile(nextItem);
+        
+        this.isUploading = false;
+        this.currentUpload = null;
+        
+        // 继续处理下一个
+        this.processQueue();
+      },
+
+      async uploadFile(item) {
+        const formData = new FormData();
+        formData.append('file', item.file);
+        
+        const embeddingModel = document.getElementById('queryEmbeddingModel').value;
+        if (embeddingModel) {
+          formData.append('embeddingModel', embeddingModel);
+        }
+
+        this.updateItem(item.id, { 
+          status: 'uploading', 
+          message: '准备上传...' 
+        });
+
+        try {
+          const response = await fetch(`${API_BASE}/api/upload/stream`, {
+            method: 'POST',
+            headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
+            body: formData,
+          });
+
+          if (!response.ok) {
+            if (response.status === 409) {
+              const errorData = await response.json();
+              this.updateItem(item.id, { 
+                status: 'error', 
+                message: errorData.error || '文件已存在' 
+              });
+              return;
+            }
+            throw new Error('上传失败');
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          
+          while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop();
+            
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === 'start') {
+                  this.updateItem(item.id, { 
+                    message: '开始处理...', 
+                    total: data.total 
+                  });
+                } else if (data.type === 'progress') {
+                  this.updateItem(item.id, { 
+                    message: '生成向量中...', 
+                    progress: data.progress,
+                    total: data.total 
+                  });
+                } else if (data.type === 'rate_limit_wait') {
+                  this.updateItem(item.id, { 
+                    message: `速率限制，等待中...`, 
+                    progress: data.progress,
+                    total: data.total 
+                  });
+                } else if (data.type === 'storing') {
+                  this.updateItem(item.id, { 
+                    message: '存储中...', 
+                    progress: data.progress,
+                    total: data.total 
+                  });
+                } else if (data.type === 'complete') {
+                  this.updateItem(item.id, { 
+                    status: 'success', 
+                    message: `上传成功 (${data.chunksCount} 个分块)`,
+                    progress: data.chunksCount,
+                    total: data.chunksCount
+                  });
+                  loadDocuments();
+                } else if (data.type === 'error') {
+                  this.updateItem(item.id, { 
+                    status: 'error', 
+                    message: data.error 
+                  });
+                }
+              }
+            }
+          }
+        } catch (error) {
+          this.updateItem(item.id, { 
+            status: 'error', 
+            message: error.message 
+          });
+        }
+      },
+
+      clearCompleted() {
+        this.queue = this.queue.filter(item => 
+          item.status === 'waiting' || item.status === 'uploading'
+        );
+        this.renderQueue();
+      }
+    };
 
     uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -1335,88 +1609,16 @@
       uploadArea.classList.remove('dragover');
       const files = e.dataTransfer.files;
       if (files.length > 0) {
-        handleFileUpload(files[0]);
+        uploadManager.addFiles(files);
       }
     });
 
     fileInput.addEventListener('change', (e) => {
       if (e.target.files.length > 0) {
-        handleFileUpload(e.target.files[0]);
+        uploadManager.addFiles(e.target.files);
       }
+      fileInput.value = ''; // 清空以允许重复选择相同文件
     });
-
-    async function handleFileUpload(file) {
-      const formData = new FormData();
-      formData.append('file', file);
-      
-      // 添加选择的 Embedding 模型
-      const embeddingModel = document.getElementById('queryEmbeddingModel').value;
-      if (embeddingModel) {
-        formData.append('embeddingModel', embeddingModel);
-      }
-
-      uploadStatus.innerHTML = '<div class="status info">准备上传<span class="loading"></span></div>';
-
-      try {
-        // 使用流式上传
-        const response = await fetch(`${API_BASE}/api/upload/stream`, {
-          method: 'POST',
-          headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
-          body: formData,
-        });
-
-        if (!response.ok) {
-          // 特殊处理 409 状态码（文件已存在）
-          if (response.status === 409) {
-            const errorData = await response.json();
-            uploadStatus.innerHTML = `<div class="status error">⚠️ ${errorData.error || '该文档已上传过'}<br><small style="color: #666;">${errorData.message || ''}</small></div>`;
-            return;
-          }
-          throw new Error('上传失败');
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        
-        while (true) {
-          const { done, value } = await reader.read();
-          
-          if (done) break;
-          
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop(); // 保留不完整的行
-          
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = JSON.parse(line.slice(6));
-              
-              if (data.type === 'start') {
-                uploadStatus.innerHTML = `<div class="status info">开始处理：${data.fileName}，共 ${data.total} 个文本块<span class="loading"></span></div>`;
-              } else if (data.type === 'progress') {
-                const percent = Math.round((data.progress / data.total) * 100);
-                uploadStatus.innerHTML = `<div class="status info">生成向量中：${data.progress}/${data.total} (${percent}%)<span class="loading"></span></div>`;
-              } else if (data.type === 'rate_limit_wait') {
-                uploadStatus.innerHTML = `<div class="status info">⏸️ 速率限制，已等待 ${data.waitedMinutes} 分钟，继续处理中... ${data.progress}/${data.total}<span class="loading"></span></div>`;
-              } else if (data.type === 'storing') {
-                const percent = Math.round((data.progress / data.total) * 100);
-                uploadStatus.innerHTML = `<div class="status info">存储中：${data.progress}/${data.total} (${percent}%)<span class="loading"></span></div>`;
-              } else if (data.type === 'complete') {
-                uploadStatus.innerHTML = `<div class="status success">✓ 上传成功！文件：${data.fileName}，分块数：${data.chunksCount}</div>`;
-                loadDocuments();
-              } else if (data.type === 'error') {
-                uploadStatus.innerHTML = `<div class="status error">✗ 上传失败：${data.error}</div>`;
-              }
-            }
-          }
-        }
-      } catch (error) {
-        uploadStatus.innerHTML = `<div class="status error">✗ 上传失败：${error.message}</div>`;
-      }
-
-      fileInput.value = '';
-    }
 
     // 加载文档列表
     async function loadDocuments() {
