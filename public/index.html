@@ -1669,6 +1669,7 @@
             <div class="doc-meta">
               分块数：${doc.chunksCount} | 
               上传时间：${new Date(doc.timestamp).toLocaleString('zh-CN')}
+              <button class="delete-doc-btn" onclick="deleteDocument('${doc.docId}', '${doc.fileName}')" style="margin-left: 10px; padding: 4px 8px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">删除</button>
             </div>
           </div>
         `).join('');
@@ -1695,6 +1696,33 @@
         loadDocuments();
       }
     });
+
+    // 删除文档
+    window.deleteDocument = async function(docId, fileName) {
+      if (!confirm(`确定要删除文档 "${fileName}" 吗？\n\n此操作将删除文档的所有数据（文本块和向量），不可恢复！`)) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/api/document/delete`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ docId }),
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          alert(`文档 "${data.fileName}" 删除成功！`);
+          // 重新加载文档列表
+          loadDocuments(true);
+        } else {
+          alert(`删除失败：${data.error}`);
+        }
+      } catch (error) {
+        alert(`删除失败：${error.message}`);
+      }
+    };
 
     // 查询
     const queryInput = document.getElementById('queryInput');

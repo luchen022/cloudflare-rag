@@ -48,6 +48,8 @@ export default {
         return await handleSaveConfig(request, env);
       } else if (url.pathname === '/api/models/fetch' && request.method === 'POST') {
         return await handleFetchModels(request, env);
+      } else if (url.pathname === '/api/document/delete' && request.method === 'POST') {
+        return await handleDeleteDocument(request, env);
       } else {
         return new Response('Not Found', { status: 404 });
       }
@@ -774,24 +776,52 @@ async function addDocumentToList(env, docInfo) {
   const indexJson = await env.KV.get('documents_index');
   const index = indexJson ? JSON.parse(indexJson) : { total: 0, pages: 0 };
   
-  // 计算当前页码
-  const currentPage = Math.floor(index.total / DOCS_PER_PAGE);
+  // 检查是否有空缺位置可以复用
+  const vacanciesJson = await env.KV.get('documents_vacancies');
+  const vacancies = vacanciesJson ? JSON.parse(vacanciesJson) : [];
   
-  // 读取当前页
-  const pageKey = `documents_list_page_${currentPage}`;
-  const pageJson = await env.KV.get(pageKey);
-  const pageData = pageJson ? JSON.parse(pageJson) : [];
-  
-  // 添加文档
-  pageData.push(docInfo);
-  
-  // 保存当前页
-  await env.KV.put(pageKey, JSON.stringify(pageData));
-  
-  // 更新索引
-  index.total += 1;
-  index.pages = Math.ceil(index.total / DOCS_PER_PAGE);
-  await env.KV.put('documents_index', JSON.stringify(index));
+  if (vacancies.length > 0) {
+    // 有空缺，复用第一个空缺位置
+    const vacancy = vacancies.shift(); // 取出第一个空缺
+    const { page, index: idx } = vacancy;
+    
+    // 读取该页
+    const pageKey = `documents_list_page_${page}`;
+    const pageJson = await env.KV.get(pageKey);
+    const pageData = pageJson ? JSON.parse(pageJson) : [];
+    
+    // 填充空缺位置
+    pageData[idx] = docInfo;
+    
+    // 保存该页
+    await env.KV.put(pageKey, JSON.stringify(pageData));
+    
+    // 更新空缺列表
+    await env.KV.put('documents_vacancies', JSON.stringify(vacancies));
+    
+    // 更新索引（只增加总数，不增加页数）
+    index.total += 1;
+    await env.KV.put('documents_index', JSON.stringify(index));
+  } else {
+    // 没有空缺，追加到末尾
+    const currentPage = Math.floor(index.total / DOCS_PER_PAGE);
+    
+    // 读取当前页
+    const pageKey = `documents_list_page_${currentPage}`;
+    const pageJson = await env.KV.get(pageKey);
+    const pageData = pageJson ? JSON.parse(pageJson) : [];
+    
+    // 添加文档
+    pageData.push(docInfo);
+    
+    // 保存当前页
+    await env.KV.put(pageKey, JSON.stringify(pageData));
+    
+    // 更新索引
+    index.total += 1;
+    index.pages = Math.ceil(index.total / DOCS_PER_PAGE);
+    await env.KV.put('documents_index', JSON.stringify(index));
+  }
 }
 
 // 检查文档是否存在
@@ -810,7 +840,7 @@ async function checkDocumentExists(env, fileName) {
     
     if (pageJson) {
       const pageData = JSON.parse(pageJson);
-      const existingDoc = pageData.find(doc => doc.fileName === fileName);
+      const existingDoc = pageData.find(doc => doc !== null && doc.fileName === fileName);
       if (existingDoc) {
         return existingDoc;
       }
@@ -844,6 +874,95 @@ async function getAllDocuments(env) {
   return allDocuments;
 }
 
+// 删除文档
+async function handleDeleteDocument(request, env) {
+  try {
+    const { docId } = await request.json();
+    
+    if (!docId) {
+      return jsonResponse({ error: '缺少文档ID' }, 400);
+    }
+
+    // 1. 从 KV 中找到文档信息
+    const indexJson = await env.KV.get('documents_index');
+    if (!indexJson) {
+      return jsonResponse({ error: '文档不存在' }, 404);
+    }
+    
+    const index = JSON.parse(indexJson);
+    let docInfo = null;
+    let foundPage = -1;
+    let foundIndex = -1;
+    
+    // 遍历所有页查找文档
+    for (let page = 0; page < index.pages; page++) {
+      const pageKey = `documents_list_page_${page}`;
+      const pageJson = await env.KV.get(pageKey);
+      
+      if (pageJson) {
+        const pageData = JSON.parse(pageJson);
+        const docIndex = pageData.findIndex(doc => doc && doc.docId === docId);
+        
+        if (docIndex !== -1) {
+          docInfo = pageData[docIndex];
+          foundPage = page;
+          foundIndex = docIndex;
+          break;
+        }
+      }
+    }
+    
+    if (!docInfo) {
+      return jsonResponse({ error: '文档不存在' }, 404);
+    }
+
+    // 2. 删除 R2 中的所有文本块
+    const deleteR2Promises = [];
+    for (let i = 0; i < docInfo.chunksCount; i++) {
+      const chunkId = `${docId}-${i}`;
+      deleteR2Promises.push(env.R2.delete(chunkId));
+    }
+    await Promise.all(deleteR2Promises);
+
+    // 3. 删除 Vectorize 中的所有向量
+    const vectorIds = [];
+    for (let i = 0; i < docInfo.chunksCount; i++) {
+      vectorIds.push(`${docId}-${i}`);
+    }
+    await env.VECTORIZE.deleteByIds(vectorIds);
+
+    // 4. 从 KV 文档列表中删除记录（设为 null，保留空缺）
+    const pageKey = `documents_list_page_${foundPage}`;
+    const pageJson = await env.KV.get(pageKey);
+    const pageData = JSON.parse(pageJson);
+    
+    // 将该位置设为 null（保留空缺，不影响其他文档的索引）
+    pageData[foundIndex] = null;
+    
+    // 更新该页
+    await env.KV.put(pageKey, JSON.stringify(pageData));
+    
+    // 记录空缺位置，供下次上传复用
+    const vacanciesJson = await env.KV.get('documents_vacancies');
+    const vacancies = vacanciesJson ? JSON.parse(vacanciesJson) : [];
+    vacancies.push({ page: foundPage, index: foundIndex });
+    await env.KV.put('documents_vacancies', JSON.stringify(vacancies));
+    
+    // 更新索引（减少总数）
+    index.total -= 1;
+    await env.KV.put('documents_index', JSON.stringify(index));
+
+    return jsonResponse({
+      success: true,
+      message: '文档删除成功',
+      fileName: docInfo.fileName,
+    });
+  } catch (error) {
+    console.error('删除文档失败:', error);
+    return jsonResponse({ error: error.message }, 500);
+  }
+}
+
 // 列出所有文档
 // 列出所有文档
 async function handleList(request, env) {
@@ -861,35 +980,44 @@ async function handleList(request, env) {
   
   // 计算需要读取哪些存储页
   const startDoc = page * pageSize;
-  const endDoc = startDoc + pageSize;
-  
-  const startPage = Math.floor(startDoc / DOCS_PER_PAGE);
-  const endPage = Math.floor((endDoc - 1) / DOCS_PER_PAGE);
   
   const allDocuments = [];
+  let currentPage = Math.floor(startDoc / DOCS_PER_PAGE);
+  let skipCount = startDoc % DOCS_PER_PAGE;
   
-  // 读取需要的存储页
-  for (let p = startPage; p <= endPage && p < index.pages; p++) {
-    const pageKey = `documents_list_page_${p}`;
+  // 持续读取直到获得足够的文档或没有更多页
+  while (allDocuments.length < pageSize && currentPage < index.pages) {
+    const pageKey = `documents_list_page_${currentPage}`;
     const pageJson = await env.KV.get(pageKey);
     
     if (pageJson) {
       const pageData = JSON.parse(pageJson);
-      allDocuments.push(...pageData);
+      
+      // 过滤掉 null（已删除的文档）
+      const validDocs = pageData.filter(doc => doc !== null);
+      
+      // 跳过前面的文档（仅第一页需要）
+      const docsToAdd = skipCount > 0 ? validDocs.slice(skipCount) : validDocs;
+      allDocuments.push(...docsToAdd);
+      
+      skipCount = 0; // 后续页不需要跳过
     }
+    
+    currentPage++;
   }
   
-  // 排序并截取需要的部分
-  const sortedDocs = allDocuments.sort((a, b) => b.timestamp - a.timestamp);
-  const startIndex = startDoc % DOCS_PER_PAGE;
-  const documents = sortedDocs.slice(startIndex, startIndex + pageSize);
+  // 只返回需要的数量
+  const documents = allDocuments.slice(0, pageSize);
+  
+  // 排序
+  documents.sort((a, b) => b.timestamp - a.timestamp);
   
   return jsonResponse({
     documents,
     total: index.total,
     page,
     pageSize,
-    hasMore: endDoc < index.total,
+    hasMore: allDocuments.length === pageSize && (startDoc + pageSize) < index.total,
   });
 }
 
