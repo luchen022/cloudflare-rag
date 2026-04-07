@@ -38,6 +38,8 @@ export default {
         return await handleUploadStream(request, env);
       } else if (url.pathname === '/api/query' && request.method === 'POST') {
         return await handleQuery(request, env);
+      } else if (url.pathname === '/api/query/stream' && request.method === 'POST') {
+        return await handleQueryStream(request, env);
       } else if (url.pathname === '/api/list' && request.method === 'GET') {
         return await handleList(request, env);
       } else if (url.pathname === '/api/debug/r2' && request.method === 'GET') {
@@ -654,7 +656,7 @@ async function handleUpload(request, env) {
   });
 }
 
-// 处理查询
+// 处理查询（非流式）
 async function handleQuery(request, env) {
   const config = await getConfig(env);
   
@@ -739,6 +741,123 @@ ${contextText}
       preview: c.text.substring(0, 100) + '...',
     })),
     fromKnowledgeBase: hasKnowledge,
+  });
+}
+
+// 处理查询（流式）
+async function handleQueryStream(request, env) {
+  const config = await getConfig(env);
+  
+  if (!config.configured) {
+    return jsonResponse({ error: '请先配置 API' }, 400);
+  }
+  
+  const { question, topK = 5, embeddingModel, llmModel } = await request.json();
+  
+  if (!question || question.trim().length === 0) {
+    return jsonResponse({ error: '问题不能为空' }, 400);
+  }
+
+  const selectedEmbeddingModel = embeddingModel || config.selectedEmbeddingModel;
+  const selectedLLMModel = llmModel || config.selectedLLMModel;
+
+  // 获取问题的向量（使用速率限制）
+  const estimatedTokens = Math.ceil(question.length / 4);
+  await checkRateLimitWithWait(env, 'embedding', estimatedTokens);
+  
+  const questionEmbedding = await getEmbeddings([question], selectedEmbeddingModel, config, env);
+  
+  // 在 Vectorize 中检索
+  const results = await env.VECTORIZE.query(questionEmbedding[0], {
+    topK,
+    returnMetadata: true,
+  });
+
+  let contexts = [];
+  let hasKnowledge = false;
+  
+  // 设置相似度阈值
+  const SIMILARITY_THRESHOLD = 0.5;
+  
+  if (results.matches && results.matches.length > 0) {
+    for (const match of results.matches) {
+      if (match.score >= SIMILARITY_THRESHOLD) {
+        const chunkId = match.id;
+        const object = await env.R2.get(chunkId);
+        
+        if (object) {
+          const text = await object.text();
+          contexts.push({
+            text,
+            score: match.score,
+            metadata: match.metadata,
+          });
+        }
+      }
+    }
+    hasKnowledge = contexts.length > 0;
+  }
+
+  // 构建 Prompt
+  let prompt;
+  if (hasKnowledge) {
+    const contextText = contexts.map(c => c.text).join('\n\n');
+    prompt = `你是一个智能助手。下面提供了一些知识库内容，但这些内容可能与问题相关，也可能不相关。
+
+知识库内容：
+${contextText}
+
+问题：${question}
+
+请回答问题。如果知识库内容与问题相关，请基于知识库回答；如果知识库内容与问题不相关，请忽略知识库，直接用你自己的知识回答问题。不要说"知识库中没有相关信息"之类的话，直接给出答案即可。`;
+  } else {
+    prompt = `问题：${question}
+
+请直接回答这个问题。`;
+  }
+
+  // 先发送 sources 信息
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+
+  // 异步处理流式响应
+  (async () => {
+    try {
+      // 发送 sources 信息
+      await writer.write(encoder.encode(`data: ${JSON.stringify({
+        type: 'sources',
+        sources: contexts.map(c => ({
+          fileName: c.metadata.fileName,
+          chunkIndex: c.metadata.chunkIndex,
+          score: c.score,
+          preview: c.text.substring(0, 100) + '...',
+        })),
+        fromKnowledgeBase: hasKnowledge,
+      })}\n\n`));
+
+      // 调用 LLM API（流式）
+      await getLLMCompletionStream(prompt, selectedLLMModel, config, env, writer, encoder);
+      
+      // 发送完成信号
+      await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'done' })}\n\n`));
+    } catch (error) {
+      await writer.write(encoder.encode(`data: ${JSON.stringify({
+        type: 'error',
+        error: error.message,
+      })}\n\n`));
+    } finally {
+      await writer.close();
+    }
+  })();
+
+  return new Response(readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    },
   });
 }
 
@@ -1051,7 +1170,7 @@ async function getEmbeddings(texts, model, config, env) {
   throw new Error('Embedding API 返回格式不正确');
 }
 
-// 调用 LLM API（OpenAI 兼容格式）
+// 调用 LLM API（OpenAI 兼容格式 - 非流式）
 async function getLLMCompletion(prompt, model, config, env) {
   // 估算 token 数
   const estimatedTokens = Math.ceil(prompt.length / 4);
@@ -1092,6 +1211,90 @@ async function getLLMCompletion(prompt, model, config, env) {
   }
   
   throw new Error('LLM API 返回格式不正确');
+}
+
+// 调用 LLM API（OpenAI 兼容格式 - 流式）
+async function getLLMCompletionStream(prompt, model, config, env, writer, encoder) {
+  // 估算 token 数
+  const estimatedTokens = Math.ceil(prompt.length / 4);
+  
+  // 检查速率限制（带等待）
+  await checkRateLimitWithWait(env, 'llm', estimatedTokens);
+  
+  const url = `${config.llmBaseUrl}/chat/completions`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.llmApiKey}`,
+    },
+    body: JSON.stringify({
+      model: model,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        }
+      ],
+      temperature: 0.7,
+      stream: true,  // 开启流式
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`LLM API 调用失败: ${response.statusText} - ${errorText}`);
+  }
+
+  // 读取流式响应
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    
+    if (done) break;
+    
+    // 解码数据块
+    buffer += decoder.decode(value, { stream: true });
+    
+    // 按行处理
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // 保留最后一个不完整的行
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      
+      if (trimmedLine === '' || trimmedLine === 'data: [DONE]') {
+        continue;
+      }
+      
+      if (trimmedLine.startsWith('data: ')) {
+        try {
+          const jsonStr = trimmedLine.substring(6);
+          const data = JSON.parse(jsonStr);
+          
+          // OpenAI 格式
+          if (data.choices && data.choices[0] && data.choices[0].delta) {
+            const content = data.choices[0].delta.content;
+            
+            if (content) {
+              // 发送内容块
+              await writer.write(encoder.encode(`data: ${JSON.stringify({
+                type: 'content',
+                content: content,
+              })}\n\n`));
+            }
+          }
+        } catch (e) {
+          // 忽略解析错误
+          console.error('解析 SSE 数据失败:', e);
+        }
+      }
+    }
+  }
 }
 
 // 简单的密码哈希（使用 Web Crypto API）

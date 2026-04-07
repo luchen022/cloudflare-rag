@@ -674,6 +674,13 @@
           <option value="">加载中...</option>
         </select>
       </div>
+      <div class="model-selector">
+        <label>响应模式:</label>
+        <select id="streamMode">
+          <option value="stream" selected>流式响应（推荐）</option>
+          <option value="normal">普通响应</option>
+        </select>
+      </div>
       <input type="text" class="query-input" id="queryInput" placeholder="输入你的问题...">
       <button id="queryBtn">提问</button>
       <div id="queryResult"></div>
@@ -808,20 +815,44 @@
     }
     
     async function checkAuth() {
-      const response = await fetch(`${API_BASE}/api/auth/check`, {
-        headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
-      });
-      const data = await response.json();
-      
-      if (data.needSetup) {
-        showAuthModal(true);
-      } else if (!data.authenticated) {
-        showAuthModal(false);
-      } else {
-        document.getElementById('authModal').style.display = 'none';
-        document.getElementById('mainContent').style.display = 'block';
-        loadConfig();
-        loadDocuments();
+      try {
+        const response = await fetch(`${API_BASE}/api/auth/check`, {
+          headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.needSetup) {
+          showAuthModal(true);
+        } else if (!data.authenticated) {
+          showAuthModal(false);
+        } else {
+          document.getElementById('authModal').style.display = 'none';
+          document.getElementById('mainContent').style.display = 'block';
+          loadConfig();
+          loadDocuments();
+        }
+      } catch (error) {
+        console.error('认证检查失败:', error);
+        // 显示错误信息
+        document.body.innerHTML = `
+          <div style="padding: 40px; text-align: center; font-family: sans-serif;">
+            <h2 style="color: #f44336;">⚠️ 无法连接到服务器</h2>
+            <p>错误: ${error.message}</p>
+            <p style="margin-top: 20px;">请检查：</p>
+            <ul style="text-align: left; max-width: 500px; margin: 20px auto;">
+              <li>API 地址: <code>${API_BASE || '(当前域名)'}</code></li>
+              <li>Workers 是否已部署</li>
+              <li>网络连接是否正常</li>
+              <li>浏览器控制台是否有 CORS 错误</li>
+            </ul>
+            <button onclick="location.reload()" style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 20px;">重试</button>
+          </div>
+        `;
       }
     }
     
@@ -1736,138 +1767,111 @@
       }
     });
 
+    // 查询处理函数
     async function handleQuery() {
-      const question = queryInput.value.trim();
-      
-      if (!question) {
-        return;
-      }
+      const question = document.getElementById('queryInput').value.trim();
+      if (!question) return;
 
       const embeddingModel = document.getElementById('queryEmbeddingModel').value;
       const llmModel = document.getElementById('queryLLMModel').value;
+      const streamMode = document.getElementById('streamMode').value;
+      const queryBtn = document.getElementById('queryBtn');
+      const queryResult = document.getElementById('queryResult');
 
       queryBtn.disabled = true;
       queryResult.innerHTML = '<div class="status info">思考中<span class="loading"></span></div>';
 
       try {
-        const response = await fetch(`${API_BASE}/api/query`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({ 
-            question, 
-            topK: 5,
-            embeddingModel,
-            llmModel,
-          }),
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-          // 预处理：将 [...] 格式的公式转换为 $$...$$ 格式
-          let processedAnswer = data.answer;
-          
-          // 转换块级公式：[...] 或 \[...\] -> $$...$$
-          processedAnswer = processedAnswer.replace(/\\\[([\s\S]*?)\\\]/g, function(m, p1) { return '$$' + p1 + '$$'; });
-          processedAnswer = processedAnswer.replace(/\[([\s\S]*?)\]/g, (match, formula) => {
-            // 只转换包含数学符号的 [...] (避免误转换普通方括号)
-            if (/[\\{}^_=]|\\[a-zA-Z]+/.test(formula)) {
-              return '$$' + formula + '$$';
-            }
-            return match;
-          });
-          
-          // 转换行内公式：\(...\) -> $...$
-          processedAnswer = processedAnswer.replace(/\\\(([\s\S]*?)\\\)/g, function(m, p1) { return '$' + p1 + '$'; });
-          
-          
-          // 保护公式：先提取公式，用占位符替换
-          const mathBlocks = [];
-          let protectedAnswer = processedAnswer;
-          
-          // 提取块级公式 $$...$$
-          protectedAnswer = protectedAnswer.replace(/\$\$([\s\S]*?)\$\$/g, function(match, formula) {
-            const index = mathBlocks.length;
-            mathBlocks.push({ type: 'block', formula: formula });
-            return `MATHBLOCK${index}ENDMATH`;
-          });
-          
-          // 提取行内公式 $...$
-          protectedAnswer = protectedAnswer.replace(/\$([^\$\n]+?)\$/g, function(match, formula) {
-            const index = mathBlocks.length;
-            mathBlocks.push({ type: 'inline', formula: formula });
-            return `MATHINLINE${index}ENDMATH`;
-          });
-          
-          // 用 marked 渲染 markdown
-          let htmlContent;
-          if (typeof marked !== 'undefined') {
-            htmlContent = marked.parse(protectedAnswer);
-          } else {
-            htmlContent = protectedAnswer.replace(/\n/g, '<br>');
-          }
-          
-          // 恢复公式
-          mathBlocks.forEach((item, index) => {
-            if (item.type === 'block') {
-              htmlContent = htmlContent.replace(`MATHBLOCK${index}ENDMATH`, `$$${item.formula}$$`);
-            } else {
-              htmlContent = htmlContent.replace(`MATHINLINE${index}ENDMATH`, `$${item.formula}$`);
-            }
-          });
-          
-          
-          let html = `<div class="result">
-            <strong>回答：</strong>`;
-          
-          // 如果没有使用知识库，显示提示
-          if (data.fromKnowledgeBase === false) {
-            html += `<div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 8px 12px; margin: 8px 0; color: #856404;">
-              ⚠️ 知识库中未找到相关信息，以下回答基于模型的通用知识
-            </div>`;
-          }
-          
-          html += `<div class="answer-content" style="margin-top: 8px;">${htmlContent}</div>`;
-
-          if (data.sources && data.sources.length > 0) {
-            html += `<div class="sources">
-              <strong>参考来源：</strong>`;
-            
-            data.sources.forEach((source, idx) => {
-              html += `<div class="source-item">
-                <strong>${idx + 1}.</strong> ${source.fileName} (片段 ${source.chunkIndex + 1}, 相似度: ${(source.score * 100).toFixed(1)}%)
-                <div style="color: #666; margin-top: 4px;">${source.preview}</div>
-              </div>`;
-            });
-
-            html += `</div>`;
-          }
-
-          html += `</div>`;
-          queryResult.innerHTML = html;
-          
-          // 渲染数学公式
-          if (typeof renderMathInElement !== 'undefined') {
-            const answerContent = queryResult.querySelector('.answer-content');
-            if (answerContent) {
-              renderMathInElement(answerContent, {
-                delimiters: [
-                  {left: '$$', right: '$$', display: true},
-                  {left: '$', right: '$', display: false},
-                  {left: '\\[', right: '\\]', display: true},
-                  {left: '\\(', right: '\\)', display: false}
-                ],
-                throwOnError: false
-              });
-            }
-          }
+        if (streamMode === 'stream') {
+          await handleQueryStream(question, embeddingModel, llmModel);
         } else {
-          queryResult.innerHTML = `<div class="status error">✗ 查询失败：${data.error}</div>`;
+          await handleQueryNormal(question, embeddingModel, llmModel);
         }
       } catch (error) {
         queryResult.innerHTML = `<div class="status error">✗ 查询失败：${error.message}</div>`;
       } finally {
         queryBtn.disabled = false;
+      }
+    }
+
+    async function handleQueryNormal(question, embeddingModel, llmModel) {
+      const queryResult = document.getElementById('queryResult');
+      const response = await fetch(`${API_BASE}/api/query`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ question, topK: 5, embeddingModel, llmModel }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        displayAnswer(data.answer, data.sources, data.fromKnowledgeBase);
+      } else {
+        queryResult.innerHTML = `<div class="status error">✗ 查询失败：${data.error}</div>`;
+      }
+    }
+
+    async function handleQueryStream(question, embeddingModel, llmModel) {
+      const queryResult = document.getElementById('queryResult');
+      const response = await fetch(`${API_BASE}/api/query/stream`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ question, topK: 5, embeddingModel, llmModel }),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        queryResult.innerHTML = `<div class="status error">✗ 查询失败：${data.error}</div>`;
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '', answer = '', sources = [], fromKnowledgeBase = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim() || !line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.substring(6));
+            if (data.type === 'sources') {
+              sources = data.sources;
+              fromKnowledgeBase = data.fromKnowledgeBase;
+              let html = '<div class="result"><strong>回答：</strong>';
+              if (!fromKnowledgeBase) html += '<div style="background:#fff3cd;border-left:4px solid #ffc107;padding:8px 12px;margin:8px 0;color:#856404">⚠️ 知识库中未找到相关信息</div>';
+              html += '<div class="answer-content"></div></div>';
+              queryResult.innerHTML = html;
+            } else if (data.type === 'content') {
+              answer += data.content;
+              const el = queryResult.querySelector('.answer-content');
+              if (el) el.textContent = answer;
+            } else if (data.type === 'done') {
+              displayAnswer(answer, sources, fromKnowledgeBase);
+            } else if (data.type === 'error') {
+              queryResult.innerHTML = `<div class="status error">✗ ${data.error}</div>`;
+            }
+          } catch (e) { console.error('SSE parse error:', e); }
+        }
+      }
+    }
+
+    function displayAnswer(answer, sources, fromKnowledgeBase) {
+      const queryResult = document.getElementById('queryResult');
+      let html = typeof marked !== 'undefined' ? marked.parse(answer) : answer.replace(/\\n/g, '<br>');
+      let result = '<div class="result"><strong>回答：</strong>';
+      if (!fromKnowledgeBase) result += '<div style="background:#fff3cd;border-left:4px solid #ffc107;padding:8px;margin:8px 0;color:#856404">⚠️ 知识库中未找到相关信息</div>';
+      result += `<div>${html}</div>`;
+      if (sources && sources.length) {
+        result += '<div class="sources"><strong>参考来源：</strong>';
+        sources.forEach((s, i) => {
+          result += `<div class="source-item"><strong>${i+1}.</strong> ${s.fileName} (片段 ${s.chunkIndex+1}, 相似度: ${(s.score*100).toFixed(1)}%)<div style="color:#666;margin-top:4px">${s.preview}</div></div>`;
+        });
+        result += '</div>';
+      }
+      result += '</div>';
+      queryResult.innerHTML = result;
+      if (typeof renderMathInElement !== 'undefined') {
+        renderMathInElement(queryResult, { delimiters: [{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false });
       }
     }
 
